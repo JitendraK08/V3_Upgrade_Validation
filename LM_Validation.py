@@ -54,8 +54,8 @@ def fetch_neo4j_object_counts(driver, database_names):
 
         with driver.session(database=db) as session:
             apps = session.run("""
-                MATCH (a:Application)
-                RETURN a.Name AS app_name
+                MATCH(n:Application)
+RETURN n.DisplayName as app_name ,n.Name
             """)
 
             for record in apps:
@@ -71,7 +71,6 @@ def fetch_neo4j_object_counts(driver, database_names):
 
                 result = session.run(query).single()
                 count = result["cnt"] if result else 0
-
                 app_object_counts[app_name] = (
                     app_object_counts.get(app_name, 0) + count
                 )
@@ -143,8 +142,6 @@ def generate_report():
     neo4j_object_counts = fetch_neo4j_object_counts(
         neo4j_driver, tenants
     )
-
-    logger.info("Fetching domains")
     cursor.execute(
         "SELECT guid, name FROM aip_node.domain ORDER BY guid ASC"
     )
@@ -194,30 +191,47 @@ def generate_report():
                         cursor.execute(loc_query, (app_domain_guid, app_name))
 
                     loc_rows = cursor.fetchall()
+                    logger.info(f" LOC rows for application {app_name}: {loc_rows}")
+
                     cursor.execute(loc_per_tech)
                     loc_per_tech_rows = cursor.fetchall()
+                    logger.info(f" LOC per tech rows for application {app_name}: {loc_per_tech_rows}")
+
                     cursor.execute(extension_count)
                     extension_count_rows = cursor.fetchall()
+                    logger.info(f" Extension rows for application {app_name}: {extension_count_rows}")
+
                     cursor.execute(critical_violations)
                     critical_violations_rows = cursor.fetchall()
+                    logger.info(f" critical violations rows for application {app_name}: {critical_violations_rows}")
 
                     # -------- LOCAL --------
                     cursor.execute(f"SET search_path TO {schema}_local")
                     cursor.execute(dlms)
                     dlms_rows = cursor.fetchall()
+                    logger.info(f" DLMS rows: for application {app_name} {dlms_rows}")
                     cursor.execute(missing_code_db)
                     missing_code_db_rows = cursor.fetchall()
+                    logger.info(f" Missing Code DB rowsfor application {app_name}: {len(missing_code_db_rows)}")
                     cursor.execute(analyzed_files)
                     analyzed_files_rows = cursor.fetchall()
+                    logger.info(f" Analyzed Files rows for application {app_name}: {analyzed_files_rows}")
                     cursor.execute(missing_code)
                     missing_codes = cursor.fetchall()
+                    logger.info(f" Missing Codes for application {app_name}: {len(missing_codes)}")
 
                     # -------- MNGT --------
                     cursor.execute(f"SET search_path TO {schema}_mngt")
                     cursor.execute(customized_jobs)
                     customized_jobs_rows = cursor.fetchall()
-
+                    logger.info("customized_jobs_rows for for application {} : {}".format(app_name,customized_jobs_rows))
                     total_object_count = neo4j_object_counts.get(app_name, 0)
+
+                    if app_name in neo4j_object_counts:
+                        logger.info(f"Total objects for application '{app_name}' found: {total_object_count}")
+                    else:
+                        logger.warning(
+                            f" Total objects for Application '{app_name}' not found in Neo4j object counts. Defaulting to 0")
 
                 except Exception:
                     logger.exception(f"{context} ERROR during processing")

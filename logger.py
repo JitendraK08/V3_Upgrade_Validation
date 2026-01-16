@@ -1,7 +1,10 @@
 import logging
 from logging.handlers import RotatingFileHandler
+from datetime import datetime
 
-LOG_FILE = "V3_Upgrade_Validation.log"
+# Generate timestamp string
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+LOG_FILE = f"V3_Upgrade_Validation_{timestamp}.log"
 
 def get_logger(name: str):
     logger = logging.getLogger(name)
