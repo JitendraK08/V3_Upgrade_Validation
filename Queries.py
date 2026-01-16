@@ -119,7 +119,7 @@ and c1.object_id = ctv.caller_id
 and c2.object_id = ctv.called_id 
 """
 
-customized_jobs="SELECT count(*) FROM email_mngt.cms_objectlinks where symbol = 'afterTools';"
+customized_jobs="SELECT count(*) FROM cms_objectlinks where symbol = 'afterTools';"
 
 total_object_count="MATCH (o:Object:%s) WHERE NOT 'Deleted' IN labels(o) RETURN count(o) AS total_object_count"
 
@@ -135,3 +135,12 @@ check_app_schema="""
                     FROM pg_namespace
                     WHERE nspname LIKE %s;
                 """
+
+fetch_app_schema=""" set search_path to aip_node;
+               SELECT a.name, b.schema_prefix,a.domain_guid
+FROM application a
+JOIN connection_profile b
+  ON a.connection_profile_guid = b.guid
+WHERE (a.domain_guid = %s
+       OR a.domain_guid IS NULL);
+            """

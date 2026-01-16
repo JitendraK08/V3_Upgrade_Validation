@@ -1,48 +1,58 @@
 import psycopg2
 import pandas as pd
 from neo4j import GraphDatabase
+
 from config import load_config
+from logger import get_logger
 from Queries import (
     loc, loc_per_tech, dlms,
     extension_count, missing_code_db,
     analyzed_files, critical_violations,
     missing_code, check_schemas,
-    check_app_schema, loc_null,
-    customized_jobs
+    loc_null, customized_jobs,
+    fetch_app_schema
 )
 
+# ------------------ LOGGER ------------------
+logger = get_logger(__name__)
+
 # ------------------ LOAD CONFIG ------------------
+logger.info("Loading configuration")
 config = load_config()
-# config['NEO4J_DB'] = config['NEO4J_DB'].split(',')
 
 # ------------------ POSTGRES CONNECTION ------------------
 def postgres_connection():
-    return psycopg2.connect(
-        host=config['CSS_HOST'],
-        port=config['CSS_PORT'],
-        dbname=config['CSS_DB'],
-        user=config['CSS_USERNAME'],
-        password=config['CSS_PASSWORD']
-    )
+    try:
+        logger.info("Connecting to PostgreSQL")
+        return psycopg2.connect(
+            host=config['CSS_HOST'],
+            port=config['CSS_PORT'],
+            dbname=config['CSS_DB'],
+            user=config['CSS_USERNAME'],
+            password=config['CSS_PASSWORD']
+        )
+    except Exception:
+        logger.exception("PostgreSQL connection failed")
+        raise
 
 # ------------------ NEO4J CONNECTION ------------------
 def neo4j_connection(uri, username, password):
-    return GraphDatabase.driver(uri, auth=(username, password))
+    try:
+        logger.info("Connecting to Neo4j")
+        return GraphDatabase.driver(uri, auth=(username, password))
+    except Exception:
+        logger.exception("Neo4j connection failed")
+        raise
 
-# ------------------ FETCH ALL NEO4J OBJECT COUNTS ------------------
+# ------------------ FETCH NEO4J OBJECT COUNTS ------------------
 def fetch_neo4j_object_counts(driver, database_names):
-    """
-    Returns:
-    {
-        "AppName1": total_object_count,
-        "AppName2": total_object_count
-    }
-    """
+    logger.info("Fetching Neo4j object counts")
     app_object_counts = {}
 
     for db in database_names:
+        logger.info(f"[Neo4j DB={db}] Processing")
+
         with driver.session(database=db) as session:
-            # Fetch applications
             apps = session.run("""
                 MATCH (a:Application)
                 RETURN a.Name AS app_name
@@ -53,9 +63,8 @@ def fetch_neo4j_object_counts(driver, database_names):
                 if not app_name:
                     continue
 
-                # Dynamic label based query
                 query = f"""
-                MATCH (o:Object:{app_name})
+                MATCH (o:Object:`{app_name}`)
                 WHERE NOT 'Deleted' IN labels(o)
                 RETURN count(o) AS cnt
                 """
@@ -63,11 +72,11 @@ def fetch_neo4j_object_counts(driver, database_names):
                 result = session.run(query).single()
                 count = result["cnt"] if result else 0
 
-                # Aggregate across DBs
                 app_object_counts[app_name] = (
                     app_object_counts.get(app_name, 0) + count
                 )
 
+    logger.info("Neo4j object count collection completed")
     return app_object_counts
 
 # ------------------ VALUE EXTRACTION ------------------
@@ -119,6 +128,8 @@ def build_excel_rows(all_data):
 
 # ------------------ MAIN REPORT ------------------
 def generate_report():
+    logger.info("V3 Upgrade Validation started")
+
     connection = postgres_connection()
     cursor = connection.cursor()
 
@@ -127,79 +138,94 @@ def generate_report():
         config['NEO4J_USER'],
         config['NEO4J_PASSWORD']
     )
-    tenants = config["NEO4J_DB"].split(',')
 
-    # 🔥 Fetch Neo4j data ONCE
+    tenants = config["NEO4J_DB"].split(',')
     neo4j_object_counts = fetch_neo4j_object_counts(
-        neo4j_driver,
-        tenants
+        neo4j_driver, tenants
     )
 
-    # Fetch domains
-    cursor.execute("SELECT guid, name FROM aip_node.domain ORDER BY guid ASC")
+    logger.info("Fetching domains")
+    cursor.execute(
+        "SELECT guid, name FROM aip_node.domain ORDER BY guid ASC"
+    )
     domains = cursor.fetchall()
 
-    with pd.ExcelWriter("V3_Upgrade_Apps_Validation.xlsx", engine="openpyxl") as writer:
+    with pd.ExcelWriter(
+        "V3_Upgrade_Apps_Validation.xlsx",
+        engine="openpyxl"
+    ) as writer:
+
+        # ---- TRACK DEFAULT APPS TO SKIP DUPLICATES ----
+        processed_default_apps = set()
 
         for domain_guid, domain_name in domains:
+            logger.info(
+                f"[Domain={domain_name} | GUID={domain_guid}] Starting domain processing"
+            )
 
-            cursor.execute("""
-                SELECT name, guid, domain_guid
-                FROM aip_node.application
-                WHERE domain_guid = %s
-                   OR domain_guid IS NULL
-                ORDER BY guid ASC
-            """, (domain_guid,))
+            cursor.execute(fetch_app_schema, (domain_guid,))
             apps = cursor.fetchall()
 
             cursor.execute(check_schemas)
 
-            for app_name, guid, app_domain_guid in apps:
-
+            for app_name, schema, app_domain_guid in apps:
                 sheet = domain_name if app_domain_guid else "default"
-                guid_mod = guid.replace("-", "_")
-                param = f"%{guid_mod}%"
 
-                cursor.execute(check_app_schema, (param,))
-                schemas = cursor.fetchall()
+                # ---- SKIP DUPLICATE DEFAULT APPS ----
+                if sheet == "default":
+                    if app_name in processed_default_apps:
+                        logger.warning(
+                            f"[Domain=default | App={app_name}] Skipping duplicate application"
+                        )
+                        continue
+                    processed_default_apps.add(app_name)
 
-                set_search_path = f"uuid_{guid_mod}" if schemas else app_name
+                context = f"[Domain={sheet} | App={app_name} | Schema={schema}]"
+                logger.info(f"{context} Starting application processing")
 
-                # -------- CENTRAL --------
-                cursor.execute(f"SET search_path TO {set_search_path}_central")
+                try:
+                    # -------- CENTRAL --------
+                    cursor.execute(f"SET search_path TO {schema}_central")
 
-                loc_query = loc_null if app_domain_guid is None else loc
-                if app_domain_guid is None:
-                    cursor.execute(loc_query, (app_name,))
-                else:
-                    cursor.execute(loc_query, (app_domain_guid, app_name))
+                    loc_query = loc_null if app_domain_guid is None else loc
+                    if app_domain_guid is None:
+                        cursor.execute(loc_query, (app_name,))
+                    else:
+                        cursor.execute(loc_query, (app_domain_guid, app_name))
 
-                loc_rows = cursor.fetchall()
-                cursor.execute(loc_per_tech)
-                loc_per_tech_rows = cursor.fetchall()
-                cursor.execute(extension_count)
-                extension_count_rows = cursor.fetchall()
-                cursor.execute(critical_violations)
-                critical_violations_rows = cursor.fetchall()
+                    loc_rows = cursor.fetchall()
+                    cursor.execute(loc_per_tech)
+                    loc_per_tech_rows = cursor.fetchall()
+                    cursor.execute(extension_count)
+                    extension_count_rows = cursor.fetchall()
+                    cursor.execute(critical_violations)
+                    critical_violations_rows = cursor.fetchall()
 
-                # -------- LOCAL --------
-                cursor.execute(f"SET search_path TO {set_search_path}_local")
-                cursor.execute(dlms)
-                dlms_rows = cursor.fetchall()
-                cursor.execute(missing_code_db)
-                missing_code_db_rows = cursor.fetchall()
-                cursor.execute(analyzed_files)
-                analyzed_files_rows = cursor.fetchall()
-                cursor.execute(missing_code)
-                missing_codes = cursor.fetchall()
+                    # -------- LOCAL --------
+                    cursor.execute(f"SET search_path TO {schema}_local")
+                    cursor.execute(dlms)
+                    dlms_rows = cursor.fetchall()
+                    cursor.execute(missing_code_db)
+                    missing_code_db_rows = cursor.fetchall()
+                    cursor.execute(analyzed_files)
+                    analyzed_files_rows = cursor.fetchall()
+                    cursor.execute(missing_code)
+                    missing_codes = cursor.fetchall()
 
-                # -------- MNGT --------
-                cursor.execute(f"SET search_path TO {set_search_path}_mngt")
-                cursor.execute(customized_jobs)
-                customized_jobs_rows = cursor.fetchall()
-                print("posgres queries exution completed")
-                # -------- MERGE NEO4J --------
-                total_object_count = neo4j_object_counts.get(app_name, 0)
+                    # -------- MNGT --------
+                    cursor.execute(f"SET search_path TO {schema}_mngt")
+                    cursor.execute(customized_jobs)
+                    customized_jobs_rows = cursor.fetchall()
+
+                    total_object_count = neo4j_object_counts.get(app_name, 0)
+
+                except Exception:
+                    logger.exception(f"{context} ERROR during processing")
+                    continue
+
+                logger.info(
+                    f"{context} Completed successfully | Neo4j Objects={total_object_count}"
+                )
 
                 all_data = {
                     "domain_name": sheet,
@@ -216,10 +242,13 @@ def generate_report():
                     "Customized Jobs": customized_jobs_rows
                 }
 
-                rows = build_excel_rows(all_data)
-                df = pd.DataFrame(rows)
+                df = pd.DataFrame(build_excel_rows(all_data))
 
-                startrow = writer.sheets[sheet].max_row if sheet in writer.sheets else 0
+                startrow = (
+                    writer.sheets[sheet].max_row
+                    if sheet in writer.sheets else 0
+                )
+
                 df.to_excel(
                     writer,
                     sheet_name=sheet,
@@ -231,7 +260,8 @@ def generate_report():
     cursor.close()
     connection.close()
     neo4j_driver.close()
-    print("V3_Upgrade_Apps_Validation.xlsx generated successfully")
+
+    logger.info("V3_Upgrade_Apps_Validation.xlsx generated successfully")
 
 # ------------------ RUN ------------------
 if __name__ == "__main__":
