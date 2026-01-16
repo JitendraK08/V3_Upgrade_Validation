@@ -1,0 +1,4 @@
+psycopg2
+neo4j
+pandas
+openpyxl
