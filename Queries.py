@@ -35,88 +35,31 @@ FROM dss_code_sources
 dlms="select count(*) AS dlm_count from acc  where prop=1"
 
 
-critical_violations="""select prev_snap.metric_id,
- 
-prev_snap.metric_name,
- 
-prev_snap.metric_num_value as previous,
- 
-curr_snap.metric_num_value as current,
- 
-case when prev_snap.metric_num_value <> 0 then round(((curr_snap.metric_num_value - prev_snap.metric_num_value) * 100 / prev_snap.metric_num_value),2) else 0 end varPercent
- 
-from
- 
-(
- 
-select dmt.metric_id, dmt.metric_name, dmr.metric_num_value, metric_value_index
- 
-from dss_metric_results dmr, dss_metric_types dmt, dss_objects o
- 
-where
- 
-dmr.metric_id = dmt.metric_id
- 
-and dmr.object_id = o.object_id
- 
-and o.object_type_id = -102
- 
-and snapshot_id = (select max(snapshot_id) from dss_snapshots)
- 
-and
- 
-(dmr.metric_value_index = 0 and dmr.metric_id in (67011)
- 
-or
- 
-dmr.metric_value_index = 1 and dmr.metric_id in (67011)))
- 
-curr_snap,
- 
-(
- 
-select dmt.metric_id, dmt.metric_name, dmr.metric_num_value, metric_value_index
- 
-from dss_metric_results dmr, dss_metric_types dmt, dss_objects o
- 
-where
- 
-dmr.metric_id = dmt.metric_id
- 
-and dmr.object_id = o.object_id
- 
-and o.object_type_id = -102
- 
-and snapshot_id = (select max(snapshot_id) from dss_snapshots where snapshot_id < (select max(snapshot_id) from dss_snapshots))
- 
-and (dmr.metric_value_index = 0 and dmr.metric_id in (67011)or
- 
-dmr.metric_value_index = 1 and dmr.metric_id in (67011)))prev_snap
- 
-where curr_snap.metric_id=prev_snap.metric_id
- 
-and curr_snap.metric_value_index=prev_snap.metric_value_index
+critical_violations="""SELECT
+    dmt.metric_id,
+    dmt.metric_name,
+    dmr.metric_num_value AS current
+FROM dss_metric_results dmr
+JOIN dss_metric_types dmt
+    ON dmr.metric_id = dmt.metric_id
+JOIN dss_objects o
+    ON dmr.object_id = o.object_id
+WHERE o.object_type_id = -102
+AND dmr.snapshot_id = (
+    SELECT MAX(snapshot_id)
+    FROM dss_snapshots
+)
+AND dmr.metric_id IN (67011)
+AND dmr.metric_value_index IN (0, 1);
 """
 
-missing_code="""select distinct c1.file_path as "Referenced File",
-c2.object_name as "Missing Object Name",c2.object_type_str
-as "Missing Object Type"
-from cdt_objects c2,csv_file_objects c1,ctv_links ctv
-where c2.object_fullname like '%Unknown%'
-and c1.object_id = ctv.caller_id
-and c2.object_id = ctv.called_id
-and c2.object_id not in (select c1.object_id from cdt_objects c1,ctv_links ctv,cdt_objects c2
-where c1.object_id = ctv.caller_id and c2.object_id = ctv.called_id
-and c2.object_type_str like '%Program') 
+missing_code_db="""SELECT COUNT(*)
+FROM cdt_objects
+WHERE object_type_str LIKE 'Missing%';
 """
-
-missing_code_db="""select distinct c1.file_path as "Referenced File",
-c2.object_name as "Missing Object Name",c2.object_type_str
-as "Missing Object Type"
-from cdt_objects c2,csv_file_objects c1,ctv_links ctv
-where c2.object_type_str like 'Missing%'
-and c1.object_id = ctv.caller_id
-and c2.object_id = ctv.called_id 
+missing_code="""SELECT COUNT(*)
+FROM cdt_objects
+WHERE object_fullname LIKE '%Unknown%';
 """
 
 customized_jobs="SELECT count(*) FROM cms_objectlinks where symbol = 'afterTools';"
